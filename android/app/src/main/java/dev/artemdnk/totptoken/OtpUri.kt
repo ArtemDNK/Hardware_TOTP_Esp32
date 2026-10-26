@@ -87,7 +87,8 @@ object OtpUri {
             throw IllegalArgumentException("Поддерживается только TOTP (не HOTP)")
         }
         val label = pct(rest.substringAfter('/', "").substringBefore('?'))
-        val q = rawQuery(uri).mapValues { pct(it.value) }
+        // в параметрах otpauth '+' — это закодированный пробел (form-encoding)
+        val q = rawQuery(uri).mapValues { URLDecoder.decode(it.value, "UTF-8") }
         val secret = q["secret"]?.let(Base32::normalize)
             ?: throw IllegalArgumentException("В ссылке нет секрета")
         val issuer = q["issuer"].orEmpty()
