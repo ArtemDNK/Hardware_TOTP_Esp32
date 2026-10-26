@@ -169,7 +169,7 @@ def parse_uri(uri):
 def push_account(tok, acc):
     if acc["algo"] not in ALGOS:
         raise ValueError(f"алгоритм {acc['algo']} не поддерживается")
-    name = truncate_utf8(acc["name"].replace("\n", " "))
+    name = truncate_utf8(acc["name"].replace("\n", " ").replace("|", " "))
     tok.cmd(f"add {acc['secret']} {acc['digits']} {acc['period']} {acc['algo']} {name}")
     print(f"  + {name}  ({acc['digits']} цифр, {acc['period']} с, {acc['algo']})")
 
@@ -234,7 +234,8 @@ def main():
             if not rows:
                 print("Аккаунтов нет")
             for r in rows:
-                i, name, digits, period, algo = r.split("|")
+                i, rest = r.split("|", 1)
+                name, digits, period, algo = rest.rsplit("|", 3)
                 print(f"{i:>2}. {name:32} {digits} цифр  {period} с  {algo}")
 
         elif a.cmd == "add":
