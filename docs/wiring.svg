@@ -1,77 +1,109 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 560" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="14">
-  <rect width="900" height="560" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 600" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="14">
+  <rect width="900" height="600" fill="#ffffff"/>
   <text x="450" y="34" text-anchor="middle" font-size="20" font-weight="600" fill="#222">Hardware TOTP — схема подключения</text>
 
   <!-- ESP32-C6 -->
-  <rect x="60" y="80" width="230" height="330" rx="10" fill="#1f2937"/>
-  <text x="175" y="110" text-anchor="middle" fill="#fff" font-size="17" font-weight="600">ESP32-C6</text>
-  <g fill="#e5e7eb" font-size="14">
-    <text x="270" y="150" text-anchor="end">3V3</text>
-    <text x="270" y="190" text-anchor="end">GND</text>
-    <text x="270" y="230" text-anchor="end">GPIO6 (SDA)</text>
-    <text x="270" y="270" text-anchor="end">GPIO7 (SCL)</text>
-    <text x="270" y="310" text-anchor="end">GPIO2 (UP)</text>
-    <text x="270" y="350" text-anchor="end">GPIO3 (OK)</text>
-    <text x="270" y="390" text-anchor="end">GPIO4 (DOWN)</text>
+  <rect x="50" y="70" width="230" height="420" rx="10" fill="#1f2937"/>
+  <text x="165" y="100" text-anchor="middle" fill="#fff" font-size="17" font-weight="600">ESP32-C6</text>
+  <g fill="#e5e7eb" font-size="14" text-anchor="end">
+    <text x="262" y="140">3V3</text>
+    <text x="262" y="180">GND</text>
+    <text x="262" y="220">GPIO6</text>
+    <text x="262" y="260">GPIO7</text>
+    <text x="262" y="300">GPIO2</text>
+    <text x="262" y="340">GPIO3</text>
+    <text x="262" y="380">GPIO4</text>
+    <text x="262" y="420">GPIO18</text>
+    <text x="262" y="460">GPIO19</text>
   </g>
   <g fill="#fbbf24">
-    <circle cx="290" cy="145" r="5"/><circle cx="290" cy="185" r="5"/><circle cx="290" cy="225" r="5"/>
-    <circle cx="290" cy="265" r="5"/><circle cx="290" cy="305" r="5"/><circle cx="290" cy="345" r="5"/><circle cx="290" cy="385" r="5"/>
+    <circle cx="280" cy="135" r="5"/><circle cx="280" cy="175" r="5"/><circle cx="280" cy="215" r="5"/>
+    <circle cx="280" cy="255" r="5"/><circle cx="280" cy="295" r="5"/><circle cx="280" cy="335" r="5"/>
+    <circle cx="280" cy="375" r="5"/><circle cx="280" cy="415" r="5"/><circle cx="280" cy="455" r="5"/>
   </g>
 
-  <!-- OLED -->
-  <rect x="620" y="70" width="220" height="150" rx="10" fill="#0f172a"/>
-  <rect x="700" y="90" width="120" height="60" fill="#000" stroke="#38bdf8"/>
-  <text x="760" y="127" text-anchor="middle" fill="#38bdf8" font-family="monospace" font-size="18">482 913</text>
-  <text x="760" y="180" text-anchor="middle" fill="#fff" font-weight="600">SSD1306 OLED</text>
-  <text x="760" y="200" text-anchor="middle" fill="#9ca3af" font-size="12">128×64, I2C 0x3C</text>
-  <g fill="#e5e7eb" font-size="12"><text x="630" y="100">VCC</text><text x="630" y="120">GND</text><text x="630" y="140">SDA</text><text x="630" y="160">SCL</text></g>
+  <!-- OLED + EC11 module -->
+  <rect x="610" y="70" width="250" height="420" rx="12" fill="#1d4ed8"/>
+  <text x="735" y="100" text-anchor="middle" fill="#fff" font-size="15" font-weight="600">Модуль 1.3" OLED + EC11</text>
+  <g fill="#e0e7ff" font-size="13">
+    <text x="634" y="140">VCC</text>
+    <text x="634" y="180">GND</text>
+    <text x="634" y="220">SDA</text>
+    <text x="634" y="260">SCL</text>
+    <text x="634" y="300">CON</text>
+    <text x="634" y="340">BAK</text>
+    <text x="634" y="380">PSH</text>
+    <text x="634" y="420">TRA</text>
+    <text x="634" y="460">TRB</text>
+  </g>
+  <g fill="#e0e7ff" font-size="11" fill-opacity="0.8">
+    <text x="690" y="300">CONFIRM</text>
+    <text x="690" y="340">BACK</text>
+    <text x="690" y="380">нажатие ручки</text>
+    <text x="690" y="420">энкодер A</text>
+    <text x="690" y="460">энкодер B</text>
+  </g>
+  <rect x="700" y="120" width="140" height="70" rx="3" fill="#000" stroke="#93c5fd"/>
+  <text x="770" y="162" text-anchor="middle" fill="#7dd3fc" font-family="monospace" font-size="20">482 913</text>
+  <text x="770" y="208" text-anchor="middle" fill="#bfdbfe" font-size="11">SH1106, I2C 0x3C</text>
+  <circle cx="795" cy="250" r="26" fill="#111827" stroke="#9ca3af" stroke-width="2"/>
+  <line x1="795" y1="250" x2="808" y2="234" stroke="#e5e7eb" stroke-width="3" stroke-linecap="round"/>
 
   <!-- DS3231 -->
-  <rect x="620" y="250" width="220" height="140" rx="10" fill="#14532d"/>
-  <circle cx="790" cy="300" r="30" fill="#d1d5db" stroke="#6b7280"/>
-  <text x="790" y="304" text-anchor="middle" font-size="11" fill="#374151">CR2032</text>
-  <text x="730" y="365" text-anchor="middle" fill="#fff" font-weight="600">DS3231 RTC</text>
-  <text x="730" y="382" text-anchor="middle" fill="#bbf7d0" font-size="12">I2C 0x68</text>
-  <g fill="#e5e7eb" font-size="12"><text x="630" y="280">VCC</text><text x="630" y="300">GND</text><text x="630" y="320">SDA</text><text x="630" y="340">SCL</text></g>
+  <rect x="340" y="500" width="210" height="80" rx="10" fill="#14532d"/>
+  <text x="375" y="530" fill="#fff" font-weight="600">DS3231 RTC</text>
+  <text x="375" y="548" fill="#bbf7d0" font-size="12">I2C 0x68</text>
+  <circle cx="510" cy="540" r="24" fill="#d1d5db" stroke="#6b7280"/>
+  <text x="510" y="544" text-anchor="middle" font-size="10" fill="#374151">CR2032</text>
+  <g fill="#e5e7eb" font-size="11" text-anchor="middle">
+    <text x="360" y="573">VCC</text><text x="390" y="573">GND</text><text x="420" y="573">SDA</text><text x="450" y="573">SCL</text>
+  </g>
 
-  <!-- wires: 3V3 red -->
+  <!-- wires to module -->
   <g fill="none" stroke-width="3" stroke-linejoin="round">
-    <path d="M290 145 H520 V96 H620" stroke="#dc2626"/>
-    <path d="M520 145 V276 H620" stroke="#dc2626"/>
-    <!-- GND black -->
-    <path d="M290 185 H540 V116 H620" stroke="#111"/>
-    <path d="M540 185 V296 H620" stroke="#111"/>
-    <!-- SDA blue -->
-    <path d="M290 225 H560 V136 H620" stroke="#2563eb"/>
-    <path d="M560 225 V316 H620" stroke="#2563eb"/>
-    <!-- SCL yellow -->
-    <path d="M290 265 H580 V156 H620" stroke="#ca8a04"/>
-    <path d="M580 265 V336 H620" stroke="#ca8a04"/>
+    <path d="M280 135 H620" stroke="#dc2626"/>
+    <path d="M280 175 H620" stroke="#111"/>
+    <path d="M280 215 H620" stroke="#2563eb"/>
+    <path d="M280 255 H620" stroke="#ca8a04"/>
+    <path d="M280 295 H620" stroke="#16a34a"/>
+    <path d="M280 335 H620" stroke="#9333ea"/>
+    <path d="M280 375 H620" stroke="#ea580c"/>
+    <path d="M280 415 H620" stroke="#0891b2"/>
+    <path d="M280 455 H620" stroke="#db2777"/>
   </g>
-  <g fill="#111"><circle cx="520" cy="145" r="4" fill="#dc2626"/><circle cx="540" cy="185" r="4"/><circle cx="560" cy="225" r="4" fill="#2563eb"/><circle cx="580" cy="265" r="4" fill="#ca8a04"/></g>
 
-  <!-- buttons -->
-  <g stroke-width="3" fill="none">
-    <path d="M290 305 H340 V460" stroke="#16a34a"/>
-    <path d="M290 345 H420 V460" stroke="#9333ea"/>
-    <path d="M290 385 H500 V460" stroke="#ea580c"/>
+  <!-- I2C branch to DS3231 -->
+  <g fill="none" stroke-width="3" stroke-linejoin="round">
+    <path d="M360 135 V500" stroke="#dc2626"/>
+    <path d="M390 175 V500" stroke="#111"/>
+    <path d="M420 215 V500" stroke="#2563eb"/>
+    <path d="M450 255 V500" stroke="#ca8a04"/>
   </g>
-  <g font-size="13" text-anchor="middle">
-    <rect x="315" y="460" width="50" height="34" rx="6" fill="#f3f4f6" stroke="#111"/><text x="340" y="482">UP</text>
-    <rect x="395" y="460" width="50" height="34" rx="6" fill="#f3f4f6" stroke="#111"/><text x="420" y="482">OK</text>
-    <rect x="475" y="460" width="50" height="34" rx="6" fill="#f3f4f6" stroke="#111"/><text x="500" y="482">DOWN</text>
+  <g><circle cx="360" cy="135" r="4" fill="#dc2626"/><circle cx="390" cy="175" r="4" fill="#111"/>
+     <circle cx="420" cy="215" r="4" fill="#2563eb"/><circle cx="450" cy="255" r="4" fill="#ca8a04"/></g>
+  <!-- crossings: small white gaps to show wires do not connect -->
+  <g fill="#fff">
+    <rect x="356" y="171" width="8" height="8"/><rect x="356" y="211" width="8" height="8"/><rect x="356" y="251" width="8" height="8"/>
+    <rect x="356" y="291" width="8" height="8"/><rect x="356" y="331" width="8" height="8"/><rect x="356" y="371" width="8" height="8"/>
+    <rect x="356" y="411" width="8" height="8"/><rect x="356" y="451" width="8" height="8"/>
+    <rect x="386" y="211" width="8" height="8"/><rect x="386" y="251" width="8" height="8"/><rect x="386" y="291" width="8" height="8"/>
+    <rect x="386" y="331" width="8" height="8"/><rect x="386" y="371" width="8" height="8"/><rect x="386" y="411" width="8" height="8"/>
+    <rect x="386" y="451" width="8" height="8"/>
+    <rect x="416" y="251" width="8" height="8"/><rect x="416" y="291" width="8" height="8"/><rect x="416" y="331" width="8" height="8"/>
+    <rect x="416" y="371" width="8" height="8"/><rect x="416" y="411" width="8" height="8"/><rect x="416" y="451" width="8" height="8"/>
+    <rect x="446" y="291" width="8" height="8"/><rect x="446" y="331" width="8" height="8"/><rect x="446" y="371" width="8" height="8"/>
+    <rect x="446" y="411" width="8" height="8"/><rect x="446" y="451" width="8" height="8"/>
   </g>
-  <path d="M340 494 V515 H500 V494 M420 494 V515 M420 515 V525" stroke="#111" stroke-width="3" fill="none"/>
-  <path d="M405 525 H435 M410 530 H430 M415 535 H425" stroke="#111" stroke-width="2"/>
-  <text x="445" y="533" font-size="12">GND</text>
-  <text x="430" y="553" text-anchor="middle" font-size="12" fill="#444">Кнопки замыкают пин на GND. Подтяжки 100 кОм от каждого GPIO2/3/4 к 3V3.</text>
+  <!-- redraw vertical segments over gaps -->
+  <g stroke-width="3">
+    <line x1="360" y1="140" x2="360" y2="500" stroke="#dc2626"/>
+    <line x1="390" y1="180" x2="390" y2="500" stroke="#111"/>
+    <line x1="420" y1="220" x2="420" y2="500" stroke="#2563eb"/>
+    <line x1="450" y1="260" x2="450" y2="500" stroke="#ca8a04"/>
+  </g>
 
-  <!-- legend -->
-  <g font-size="12" fill="#333">
-    <line x1="60" y1="450" x2="85" y2="450" stroke="#dc2626" stroke-width="3"/><text x="92" y="454">3V3</text>
-    <line x1="60" y1="470" x2="85" y2="470" stroke="#111" stroke-width="3"/><text x="92" y="474">GND</text>
-    <line x1="60" y1="490" x2="85" y2="490" stroke="#2563eb" stroke-width="3"/><text x="92" y="494">SDA</text>
-    <line x1="60" y1="510" x2="85" y2="510" stroke="#ca8a04" stroke-width="3"/><text x="92" y="514">SCL</text>
-  </g>
+  <text x="50" y="520" font-size="12" fill="#444">VCC модуля — только от 3V3:</text>
+  <text x="50" y="536" font-size="12" fill="#444">подтяжки кнопок на модуле идут к VCC,</text>
+  <text x="50" y="552" font-size="12" fill="#444">при 5 В на GPIO попадёт 5 В.</text>
+  <text x="50" y="576" font-size="12" fill="#444">CON / BAK / PSH будят токен из сна.</text>
 </svg>

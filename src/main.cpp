@@ -1,11 +1,13 @@
 /*
- * ESP32-C6 TOTP Token
- * Аппаратный TOTP-аутентификатор (RFC 6238): ESP32-C6 + DS3231 + SSD1306 OLED + 3 кнопки.
+ * Hardware TOTP on ESP32-C6
+ * Аппаратный TOTP-аутентификатор (RFC 6238):
+ * ESP32-C6 + DS3231 + модуль 1.3" OLED SH1106 с энкодером EC11 и кнопками BACK / CONFIRM.
  *
  *  - до 16 аккаунтов, SHA1 / SHA256 / SHA512, 6-8 цифр, произвольный период
- *  - PIN-код на устройстве, стирание всех данных после 10 неверных попыток
- *  - глубокий сон по таймауту, пробуждение любой кнопкой
- *  - настройка через USB (token_cli.py), секреты обратно не выдаются никогда
+ *  - список аккаунтов и меню настроек на самом токене (яркость, автосон, поворот экрана)
+ *  - PIN-код вводится ручкой, стирание всех данных после 10 неверных попыток
+ *  - глубокий сон по таймауту, пробуждение кнопкой или нажатием ручки
+ *  - настройка через USB (tools/token_cli.py или Android-приложение), секреты обратно не выдаются
  *  - Wi-Fi / Bluetooth не используются вообще
  */
 
@@ -17,25 +19,37 @@
 #include <mbedtls/md.h>
 #include <esp_sleep.h>
 #include <driver/rtc_io.h>
+#include <driver/pulse_cnt.h>
 #include <sys/time.h>
 
-#define FW_VERSION "1.0"
+#define FW_VERSION "2.0"
 
 // ---------------------------------------------------------------- пины
-static const uint8_t PIN_SDA      = 6;
-static const uint8_t PIN_SCL      = 7;
-static const uint8_t PIN_BTN_UP   = 2;   // LP GPIO (0..7) — нужны для пробуждения из deep sleep
-static const uint8_t PIN_BTN_OK   = 3;
-static const uint8_t PIN_BTN_DOWN = 4;
+// Разъём модуля: CON SDA SCL PSH TRA TRB BAK GND VCC
+static const uint8_t PIN_SDA   = 6;   // SDA
+static const uint8_t PIN_SCL   = 7;   // SCL
+static const uint8_t PIN_CON   = 2;   // CON — кнопка CONFIRM     } LP GPIO 0..7:
+static const uint8_t PIN_BAK   = 3;   // BAK — кнопка BACK        } только они будят
+static const uint8_t PIN_PSH   = 4;   // PSH — нажатие на ручку   } ESP32-C6 из deep sleep
+static const uint8_t PIN_ENC_A = 18;  // TRA — энкодер, фаза A
+static const uint8_t PIN_ENC_B = 19;  // TRB — энкодер, фаза B
 
 // ---------------------------------------------------------------- настройки
 static const uint8_t  MAX_ACCOUNTS     = 16;
 static const uint8_t  PIN_LEN          = 4;
 static const uint8_t  MAX_PIN_FAILS    = 10;
-static const uint32_t SLEEP_TIMEOUT_MS = 60000;
-static const uint32_t LONG_PRESS_MS    = 800;
+static const uint32_t LONG_PRESS_MS    = 700;
 static const uint32_t DEBOUNCE_MS      = 30;
 static const uint32_t MIN_VALID_TIME   = 1704067200UL;  // 2024-01-01
+
+// EC11 «20 импульсов / 20 щелчков»: один щелчок = полный цикл = 4 перехода.
+// Если ручка прыгает на 2 пункта за щелчок — поставьте 2. Не в ту сторону — ENC_DIR = -1.
+static const int ENC_STEPS_PER_DETENT = 4;
+static const int ENC_DIR              = 1;
+
+static const uint16_t SLEEP_OPTIONS[] = {15, 30, 60, 120, 300};  // секунды
+static const uint8_t  SLEEP_OPTION_COUNT = sizeof(SLEEP_OPTIONS) / sizeof(SLEEP_OPTIONS[0]);
+static const uint8_t  BRIGHTNESS_LEVELS  = 10;
 
 enum Algo : uint8_t { ALG_SHA1 = 0, ALG_SHA256 = 1, ALG_SHA512 = 2 };
 static const char* ALGO_NAMES[] = {"SHA1", "SHA256", "SHA512"};
@@ -50,7 +64,7 @@ struct Account {
 };
 
 // ---------------------------------------------------------------- глобальное состояние
-U8G2_SSD1306_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 RTC_DS3231 rtc;
 Preferences prefs;
 
@@ -65,16 +79,24 @@ uint8_t pinHash[32];
 uint8_t pinFails  = 0;
 int16_t tzMinutes = 0;
 
+uint8_t brightness = 7;   // 1..10
+uint8_t sleepIdx   = 2;   // индекс в SLEEP_OPTIONS (60 с)
+bool    flipped    = false;
+
 bool     serialAuthed = false;
 bool     displayOn    = true;
 uint32_t lastActivity = 0;
 uint32_t lastRedraw   = 0;
 
-enum Screen { SCR_PIN, SCR_MAIN, SCR_MESSAGE };
-Screen   screen = SCR_MAIN;
-Screen   afterMessage = SCR_MAIN;
+enum Screen { SCR_PIN, SCR_CODE, SCR_LIST, SCR_MENU, SCR_ABOUT, SCR_MESSAGE };
+Screen   screen = SCR_CODE;
+Screen   afterMessage = SCR_CODE;
 char     message[48];
 uint32_t messageUntil = 0;
+
+uint8_t listCursor = 0;
+uint8_t menuCursor = 0;
+bool    menuEditing = false;
 
 uint8_t pinEntry[PIN_LEN];
 uint8_t pinPos = 0;
@@ -92,9 +114,9 @@ struct Button {
   uint32_t downAt;
 };
 
-Button bUp   = {PIN_BTN_UP,   false, false, 0, 0};
-Button bOk   = {PIN_BTN_OK,   false, false, 0, 0};
-Button bDown = {PIN_BTN_DOWN, false, false, 0, 0};
+Button bCon = {PIN_CON, false, false, 0, 0};
+Button bBak = {PIN_BAK, false, false, 0, 0};
+Button bPsh = {PIN_PSH, false, false, 0, 0};
 
 void initButton(Button& b) {
 #if SOC_RTCIO_INPUT_OUTPUT_SUPPORTED
@@ -125,6 +147,64 @@ Ev pollButton(Button& b) {
     return EV_LONG;
   }
   return EV_NONE;
+}
+
+bool anyButtonDown() {
+  return digitalRead(PIN_CON) == LOW || digitalRead(PIN_BAK) == LOW || digitalRead(PIN_PSH) == LOW;
+}
+
+// ---------------------------------------------------------------- энкодер (аппаратный счётчик PCNT)
+pcnt_unit_handle_t encUnit = nullptr;
+int encConsumed = 0;
+
+bool initEncoder() {
+  pcnt_unit_config_t uc = {};
+  uc.low_limit  = -10000;
+  uc.high_limit = 10000;
+  if (pcnt_new_unit(&uc, &encUnit) != ESP_OK) return false;
+
+  pcnt_glitch_filter_config_t filter = {};
+  filter.max_glitch_ns = 1000;
+  pcnt_unit_set_glitch_filter(encUnit, &filter);
+
+  // Классическая квадратурная схема x4: каждый канал считает фронты своей фазы,
+  // направление определяется уровнем другой фазы. Подтяжки включает драйвер.
+  pcnt_chan_config_t ca = {};
+  ca.edge_gpio_num  = PIN_ENC_A;
+  ca.level_gpio_num = PIN_ENC_B;
+  pcnt_channel_handle_t chA;
+  pcnt_new_channel(encUnit, &ca, &chA);
+
+  pcnt_chan_config_t cb = {};
+  cb.edge_gpio_num  = PIN_ENC_B;
+  cb.level_gpio_num = PIN_ENC_A;
+  pcnt_channel_handle_t chB;
+  pcnt_new_channel(encUnit, &cb, &chB);
+
+  pcnt_channel_set_edge_action(chA, PCNT_CHANNEL_EDGE_ACTION_DECREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE);
+  pcnt_channel_set_level_action(chA, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE);
+  pcnt_channel_set_edge_action(chB, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_DECREASE);
+  pcnt_channel_set_level_action(chB, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE);
+
+  pcnt_unit_enable(encUnit);
+  pcnt_unit_clear_count(encUnit);
+  pcnt_unit_start(encUnit);
+  return true;
+}
+
+/** Сколько щелчков сделала ручка с прошлого вызова (со знаком). */
+int readEncoder() {
+  if (!encUnit) return 0;
+  int count = 0;
+  pcnt_unit_get_count(encUnit, &count);
+  int steps = (count - encConsumed) / ENC_STEPS_PER_DETENT;
+  encConsumed += steps * ENC_STEPS_PER_DETENT;
+  // Держим счётчик далеко от предела: сбрасываем, когда ручка стоит ровно на щелчке.
+  if (count == encConsumed && abs(encConsumed) > 4000) {
+    pcnt_unit_clear_count(encUnit);
+    encConsumed = 0;
+  }
+  return steps * ENC_DIR;
 }
 
 // ---------------------------------------------------------------- криптография
@@ -209,9 +289,12 @@ void loadAll() {
       break;
     }
   }
-  pinSet    = prefs.getBytes("pinh", pinHash, sizeof pinHash) == sizeof pinHash;
-  pinFails  = prefs.getUChar("fails", 0);
-  tzMinutes = prefs.getShort("tz", 0);
+  pinSet     = prefs.getBytes("pinh", pinHash, sizeof pinHash) == sizeof pinHash;
+  pinFails   = prefs.getUChar("fails", 0);
+  tzMinutes  = prefs.getShort("tz", 0);
+  brightness = constrain(prefs.getUChar("bright", 7), 1, BRIGHTNESS_LEVELS);
+  sleepIdx   = min<uint8_t>(prefs.getUChar("sleep", 2), SLEEP_OPTION_COUNT - 1);
+  flipped    = prefs.getBool("flip", false);
 }
 
 void wipeAll() {
@@ -268,7 +351,13 @@ void setUtc(uint32_t t) {
   settimeofday(&tv, nullptr);
 }
 
-// ---------------------------------------------------------------- экран
+// ---------------------------------------------------------------- экран: общие функции
+void applyDisplaySettings() {
+  // SH1106 почти не меняет яркость по контрасту в нижней половине — берём рабочий диапазон.
+  u8g2.setContrast(map(brightness, 1, BRIGHTNESS_LEVELS, 1, 255));
+  u8g2.setFlipMode(flipped ? 1 : 0);
+}
+
 void showMessage(const char* msg, uint32_t ms, Screen next) {
   strncpy(message, msg, sizeof message - 1);
   message[sizeof message - 1] = 0;
@@ -282,20 +371,64 @@ void drawCentered(int y, const char* s) {
   u8g2.drawUTF8((128 - w) / 2, y, s);
 }
 
-void drawStatusLine(uint32_t t, uint8_t period) {
+void drawHeader(const char* title) {
   u8g2.setFont(u8g2_font_6x12_t_cyrillic);
-  if (!timeValid(t)) return;
-  if (period) {
-    char s[8];
-    snprintf(s, sizeof s, "%2us", (unsigned)(period - t % period));
-    u8g2.drawStr(0, 63, s);
-  }
-  DateTime local(t + (int32_t)tzMinutes * 60);
-  char c[12];
-  snprintf(c, sizeof c, "%02d:%02d:%02d", local.hour(), local.minute(), local.second());
-  u8g2.drawStr(128 - u8g2.getStrWidth(c), 63, c);
+  u8g2.drawUTF8(0, 10, title);
+  u8g2.drawHLine(0, 13, 128);
 }
 
+void formatLocalTime(uint32_t t, char* out, size_t n) {
+  DateTime local(t + (int32_t)tzMinutes * 60);
+  snprintf(out, n, "%02d:%02d:%02d", local.hour(), local.minute(), local.second());
+}
+
+/**
+ * Список из rows строк под заголовком: 4 видимые строки, выделение инверсией,
+ * прокрутка и полоса прокрутки справа. value(i) — необязательное значение справа.
+ */
+void drawList(const char* title, uint8_t count, uint8_t cursor,
+              const char* (*label)(uint8_t), const char* (*value)(uint8_t), bool editing) {
+  u8g2.clearBuffer();
+  drawHeader(title);
+  const uint8_t VISIBLE = 4, ROW_H = 12, TOP = 15;
+  uint8_t first = cursor < VISIBLE ? 0 : cursor - VISIBLE + 1;
+  bool scroll = count > VISIBLE;
+  int width = scroll ? 124 : 128;
+
+  for (uint8_t r = 0; r < VISIBLE && first + r < count; r++) {
+    uint8_t i = first + r;
+    int y = TOP + r * ROW_H;
+    bool sel = i == cursor;
+    if (sel) {
+      u8g2.setDrawColor(1);
+      u8g2.drawBox(0, y, width, ROW_H);
+      u8g2.setDrawColor(0);
+    }
+    // Длинные имена обрезаются по ширине строки, чтобы не залезать на значение и полосу прокрутки
+    u8g2.setClipWindow(0, y, width - 2, y + ROW_H);
+    u8g2.drawUTF8(3, y + 10, label(i));
+    u8g2.setMaxClipWindow();
+    if (value) {
+      const char* v = value(i);
+      if (v && *v) {
+        char buf[24];
+        snprintf(buf, sizeof buf, sel && editing ? "< %s >" : "%s", v);
+        u8g2.drawUTF8(width - 3 - u8g2.getUTF8Width(buf), y + 10, buf);
+      }
+    }
+    u8g2.setDrawColor(1);
+  }
+  if (scroll) {
+    int track = VISIBLE * ROW_H;
+    int knob = max(6, track * VISIBLE / count);
+    int pos = (track - knob) * cursor / (count - 1);
+    u8g2.drawVLine(126, TOP, track);
+    u8g2.drawBox(125, TOP + pos, 3, knob);
+  }
+  u8g2.sendBuffer();
+}
+
+// ---------------------------------------------------------------- экран: коды
 void drawCode(uint32_t code, uint8_t digits) {
   char s[12];
   snprintf(s, sizeof s, "%0*lu", (int)digits, (unsigned long)code);
@@ -312,15 +445,28 @@ void drawCode(uint32_t code, uint8_t digits) {
   u8g2.drawStr(x + wa + gap, 44, b);
 }
 
-void drawMain() {
+void drawStatusLine(uint32_t t, uint8_t period) {
+  u8g2.setFont(u8g2_font_6x12_t_cyrillic);
+  if (!timeValid(t)) return;
+  if (period) {
+    char s[8];
+    snprintf(s, sizeof s, "%2us", (unsigned)(period - t % period));
+    u8g2.drawStr(0, 63, s);
+  }
+  char c[12];
+  formatLocalTime(t, c, sizeof c);
+  u8g2.drawStr(128 - u8g2.getStrWidth(c), 63, c);
+}
+
+void drawCodeScreen() {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_6x12_t_cyrillic);
   uint32_t t = nowUtc();
 
   if (accountCount == 0) {
     drawCentered(14, "Нет аккаунтов");
-    drawCentered(32, "Подключите USB и");
-    drawCentered(44, "запустите token_cli");
+    drawCentered(32, "Подключите USB:");
+    drawCentered(44, "token_cli или Android");
     drawStatusLine(t, 0);
     u8g2.sendBuffer();
     return;
@@ -329,12 +475,11 @@ void drawMain() {
   const Account& a = accounts[current];
   char hdr[48];
   snprintf(hdr, sizeof hdr, "%u/%u %s", current + 1, accountCount, a.name);
-  u8g2.drawUTF8(0, 10, hdr);
-  u8g2.drawHLine(0, 13, 128);
+  drawHeader(hdr);
 
   if (!timeValid(t)) {
     drawCentered(32, "Время не задано");
-    drawCentered(46, "token_cli.py sync");
+    drawCentered(46, "синхронизируйте по USB");
     u8g2.sendBuffer();
     return;
   }
@@ -348,32 +493,89 @@ void drawMain() {
   u8g2.sendBuffer();
 }
 
+// ---------------------------------------------------------------- экран: список аккаунтов
+const char* accountLabel(uint8_t i) { return accounts[i].name; }
+
+void drawAccountList() {
+  char title[32];
+  snprintf(title, sizeof title, "Аккаунты %u/%u", accountCount, MAX_ACCOUNTS);
+  drawList(title, accountCount, listCursor, accountLabel, nullptr, false);
+}
+
+// ---------------------------------------------------------------- экран: меню
+enum MenuItem { MI_ACCOUNTS, MI_BRIGHTNESS, MI_SLEEP, MI_FLIP, MI_ABOUT, MI_LOCK, MI_COUNT };
+
+const char* menuLabel(uint8_t i) {
+  static const char* L[] = {"Аккаунты", "Яркость", "Автосон", "Поворот", "О токене", "Заблокировать"};
+  return i < MI_COUNT ? L[i] : "";
+}
+
+const char* menuValue(uint8_t i) {
+  static char buf[12];
+  switch (i) {
+    case MI_BRIGHTNESS: snprintf(buf, sizeof buf, "%u/%u", brightness, BRIGHTNESS_LEVELS); return buf;
+    case MI_SLEEP:
+      if (SLEEP_OPTIONS[sleepIdx] < 60) snprintf(buf, sizeof buf, "%u с", SLEEP_OPTIONS[sleepIdx]);
+      else snprintf(buf, sizeof buf, "%u мин", SLEEP_OPTIONS[sleepIdx] / 60);
+      return buf;
+    case MI_FLIP: return flipped ? "180°" : "нет";
+    default: return "";
+  }
+}
+
+void drawMenu() { drawList("Меню", MI_COUNT, menuCursor, menuLabel, menuValue, menuEditing); }
+
+// ---------------------------------------------------------------- экран: о токене
+void drawAbout() {
+  u8g2.clearBuffer();
+  drawHeader("О токене");
+  char line[40];
+  uint32_t t = nowUtc();
+
+  snprintf(line, sizeof line, "Прошивка  v%s", FW_VERSION);
+  u8g2.drawUTF8(0, 26, line);
+  snprintf(line, sizeof line, "Аккаунты  %u из %u", accountCount, MAX_ACCOUNTS);
+  u8g2.drawUTF8(0, 38, line);
+  snprintf(line, sizeof line, "PIN       %s", pinSet ? "установлен" : "не задан");
+  u8g2.drawUTF8(0, 50, line);
+  if (!rtcOk)              snprintf(line, sizeof line, "Часы      нет DS3231");
+  else if (!timeValid(t))  snprintf(line, sizeof line, "Часы      не заданы");
+  else {
+    char c[12];
+    formatLocalTime(t, c, sizeof c);
+    snprintf(line, sizeof line, "Часы      %s", c);
+  }
+  u8g2.drawUTF8(0, 62, line);
+  u8g2.sendBuffer();
+}
+
+// ---------------------------------------------------------------- экран: PIN
 void drawPin() {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_6x12_t_cyrillic);
-  drawCentered(12, "Введите PIN");
+  drawCentered(10, "Введите PIN");
 
   for (uint8_t i = 0; i < PIN_LEN; i++) {
     int x = 14 + i * 26;
     if (i < pinPos) {
-      u8g2.drawDisc(x + 8, 34, 5);
+      u8g2.drawDisc(x + 8, 32, 5);
     } else if (i == pinPos) {
       u8g2.setFont(u8g2_font_logisoso20_tn);
       char d[2] = {(char)('0' + pinEntry[i]), 0};
-      u8g2.drawStr(x + 2, 44, d);
-      u8g2.drawFrame(x - 2, 18, 22, 30);
+      u8g2.drawStr(x + 2, 42, d);
+      u8g2.drawFrame(x - 2, 16, 22, 30);
+      u8g2.setFont(u8g2_font_6x12_t_cyrillic);
     } else {
-      u8g2.drawHLine(x, 44, 16);
+      u8g2.drawHLine(x, 42, 16);
     }
   }
 
-  u8g2.setFont(u8g2_font_6x12_t_cyrillic);
   if (pinFails > 0) {
     char s[32];
     snprintf(s, sizeof s, "Осталось попыток: %u", MAX_PIN_FAILS - pinFails);
     drawCentered(62, s);
   } else {
-    drawCentered(62, "OK - далее");
+    drawCentered(62, "Крутите ручку, OK");
   }
   u8g2.sendBuffer();
 }
@@ -388,7 +590,10 @@ void drawMessage() {
 void redraw() {
   switch (screen) {
     case SCR_PIN:     drawPin(); break;
-    case SCR_MAIN:    drawMain(); break;
+    case SCR_CODE:    drawCodeScreen(); break;
+    case SCR_LIST:    drawAccountList(); break;
+    case SCR_MENU:    drawMenu(); break;
+    case SCR_ABOUT:   drawAbout(); break;
     case SCR_MESSAGE: drawMessage(); break;
   }
   lastRedraw = millis();
@@ -402,10 +607,9 @@ void resetPinEntry() {
 
 void lockDevice() {
   serialAuthed = false;
-  if (pinSet) {
-    resetPinEntry();
-    screen = SCR_PIN;
-  }
+  menuEditing = false;
+  screen = pinSet ? SCR_PIN : SCR_CODE;
+  resetPinEntry();
 }
 
 void goToSleep() {
@@ -413,13 +617,10 @@ void goToSleep() {
   Serial.flush();
 
   // Ждём отпускания кнопок, иначе устройство сразу проснётся.
-  while (digitalRead(PIN_BTN_UP) == LOW || digitalRead(PIN_BTN_OK) == LOW ||
-         digitalRead(PIN_BTN_DOWN) == LOW) {
-    delay(10);
-  }
+  while (anyButtonDown()) delay(10);
   delay(50);
 
-  const uint8_t pins[] = {PIN_BTN_UP, PIN_BTN_OK, PIN_BTN_DOWN};
+  const uint8_t pins[] = {PIN_CON, PIN_BAK, PIN_PSH};
   uint64_t mask = 0;
   for (uint8_t p : pins) {
     mask |= 1ULL << p;
@@ -437,10 +638,10 @@ void goToSleep() {
 
 bool usbHostConnected() { return (bool)Serial; }
 
-void onIdleTimeout() {
+void lockAndSleep() {
   lockDevice();
   if (usbHostConnected()) {
-    // Подключены к компьютеру — не засыпаем (иначе пропадёт COM-порт), только гасим экран.
+    // Подключены к компьютеру или телефону — не засыпаем (иначе пропадёт порт), только гасим экран.
     u8g2.setPowerSave(1);
     displayOn = false;
   } else {
@@ -502,6 +703,11 @@ void printHelp() {
   Serial.println("wipe YES                  - стереть всё");
 }
 
+void fixCursors() {
+  if (current >= accountCount) current = accountCount ? accountCount - 1 : 0;
+  if (listCursor >= accountCount) listCursor = accountCount ? accountCount - 1 : 0;
+}
+
 void processCommand(String line) {
   line.trim();
   if (line.length() == 0) return;
@@ -530,7 +736,7 @@ void processCommand(String line) {
     String p = nextToken(args);
     PinResult r = verifyPin(p.c_str());
     if (r == PIN_OK) { serialAuthed = true; reply(true); }
-    else if (r == PIN_WIPED) { reply(false, "too many attempts, device wiped"); }
+    else if (r == PIN_WIPED) { screen = SCR_CODE; reply(false, "too many attempts, device wiped"); }
     else { reply(false, "wrong pin"); }
     return;
   }
@@ -587,7 +793,7 @@ void processCommand(String line) {
     for (uint8_t i = n - 1; i + 1 < accountCount; i++) accounts[i] = accounts[i + 1];
     accountCount--;
     memset(&accounts[accountCount], 0, sizeof(Account));
-    if (current >= accountCount) current = accountCount ? accountCount - 1 : 0;
+    fixCursors();
     saveAll();
     reply(true);
     return;
@@ -652,7 +858,7 @@ void processCommand(String line) {
   if (cmd == "wipe") {
     if (nextToken(args) != "YES") { reply(false, "type: wipe YES"); return; }
     wipeAll();
-    screen = SCR_MAIN;
+    screen = SCR_CODE;
     reply(true);
     return;
   }
@@ -668,21 +874,32 @@ void handleSerial() {
       processCommand(serialLine);
       serialLine = "";
       lastActivity = millis();
-      if (screen == SCR_MAIN) redraw();
+      if (screen != SCR_PIN && screen != SCR_MESSAGE && displayOn) redraw();
     } else if (serialLine.length() < 300) {
       serialLine += c;
     }
   }
 }
 
-// ---------------------------------------------------------------- обработка кнопок
-void handlePinScreen(Ev up, Ev ok, Ev dn) {
-  if (up) pinEntry[pinPos] = (pinEntry[pinPos] + 1) % 10;
-  if (dn) pinEntry[pinPos] = (pinEntry[pinPos] + 9) % 10;
-  if (ok == EV_LONG && pinPos > 0) { pinPos--; return; }
-  if (ok != EV_SHORT) return;
+// ---------------------------------------------------------------- управление
+// Ручка: поворот — навигация; нажатие ручки и CONFIRM работают одинаково.
+struct Input {
+  int  turn;      // щелчки ручки (+ по часовой)
+  bool ok;        // короткое нажатие CONFIRM или ручки
+  bool okLong;    // удержание CONFIRM или ручки
+  bool back;      // короткое нажатие BACK
+  bool backLong;  // удержание BACK
+  bool any() const { return turn || ok || okLong || back || backLong; }
+};
 
-  if (++pinPos < PIN_LEN) return;
+int wrap(int v, int n) { return ((v % n) + n) % n; }
+
+void handlePinScreen(const Input& in) {
+  if (in.turn) pinEntry[pinPos] = wrap(pinEntry[pinPos] + in.turn, 10);
+  if (in.back && pinPos > 0) { pinPos--; return; }
+  if (!in.ok) return;
+
+  if (++pinPos < PIN_LEN) { pinEntry[pinPos] = 0; return; }
 
   char p[PIN_LEN + 1];
   for (uint8_t i = 0; i < PIN_LEN; i++) p[i] = '0' + pinEntry[i];
@@ -694,20 +911,65 @@ void handlePinScreen(Ev up, Ev ok, Ev dn) {
   PinResult r = verifyPin(p);
   memset(p, 0, sizeof p);
 
-  if (r == PIN_OK)         { screen = SCR_MAIN; }
-  else if (r == PIN_WIPED) { showMessage("Данные стёрты", 3000, SCR_MAIN); }
+  if (r == PIN_OK)         { screen = SCR_CODE; }
+  else if (r == PIN_WIPED) { showMessage("Данные стёрты", 3000, SCR_CODE); }
   else                     { showMessage("Неверный PIN", 1500, SCR_PIN); }
 }
 
-void handleMainScreen(Ev up, Ev ok, Ev dn) {
-  if (accountCount > 0) {
-    if (up) current = current == 0 ? accountCount - 1 : current - 1;
-    if (dn) current = (current + 1) % accountCount;
+void handleCodeScreen(const Input& in) {
+  if (accountCount > 0 && in.turn) current = wrap(current + in.turn, accountCount);
+  if (in.ok && accountCount > 0) { listCursor = current; screen = SCR_LIST; }
+  if (in.okLong) { menuCursor = 0; menuEditing = false; screen = SCR_MENU; }
+  if (in.back) lockAndSleep();
+}
+
+void handleListScreen(const Input& in) {
+  if (accountCount == 0 || in.back) { screen = SCR_CODE; return; }
+  if (in.turn) listCursor = constrain((int)listCursor + in.turn, 0, accountCount - 1);
+  if (in.ok) { current = listCursor; screen = SCR_CODE; }
+}
+
+void saveSettings() {
+  prefs.putUChar("bright", brightness);
+  prefs.putUChar("sleep", sleepIdx);
+  prefs.putBool("flip", flipped);
+}
+
+void handleMenuScreen(const Input& in) {
+  if (menuEditing) {
+    if (in.turn) {
+      if (menuCursor == MI_BRIGHTNESS) brightness = constrain((int)brightness + in.turn, 1, BRIGHTNESS_LEVELS);
+      if (menuCursor == MI_SLEEP)      sleepIdx = constrain((int)sleepIdx + in.turn, 0, SLEEP_OPTION_COUNT - 1);
+      applyDisplaySettings();
+    }
+    if (in.ok || in.back) { menuEditing = false; saveSettings(); }
+    return;
   }
-  if (ok == EV_LONG) {
-    lockDevice();
-    if (usbHostConnected()) { u8g2.setPowerSave(1); displayOn = false; }
-    else goToSleep();
+
+  if (in.back) { screen = SCR_CODE; return; }
+  if (in.turn) menuCursor = constrain((int)menuCursor + in.turn, 0, MI_COUNT - 1);
+  if (!in.ok) return;
+
+  switch (menuCursor) {
+    case MI_ACCOUNTS:
+      if (accountCount) { listCursor = current; screen = SCR_LIST; }
+      else showMessage("Аккаунтов нет", 1200, SCR_MENU);
+      break;
+    case MI_BRIGHTNESS:
+    case MI_SLEEP:
+      menuEditing = true;
+      break;
+    case MI_FLIP:
+      flipped = !flipped;
+      applyDisplaySettings();
+      saveSettings();
+      break;
+    case MI_ABOUT:
+      screen = SCR_ABOUT;
+      break;
+    case MI_LOCK:
+      lockAndSleep();
+      break;
   }
 }
 
@@ -715,9 +977,10 @@ void handleMainScreen(Ev up, Ev ok, Ev dn) {
 void setup() {
   Serial.begin(115200);
 
-  initButton(bUp);
-  initButton(bOk);
-  initButton(bDown);
+  initButton(bCon);
+  initButton(bBak);
+  initButton(bPsh);
+  initEncoder();
 
   Wire.begin(PIN_SDA, PIN_SCL);
   Wire.setClock(400000);
@@ -735,9 +998,10 @@ void setup() {
 
   prefs.begin("totp", false);
   loadAll();
+  applyDisplaySettings();
 
   resetPinEntry();
-  screen = pinSet ? SCR_PIN : SCR_MAIN;
+  screen = pinSet ? SCR_PIN : SCR_CODE;
   if (!rtcOk) showMessage("DS3231 не найден", 2000, screen);
   else if (rtcLost) showMessage("RTC сброшен!", 2000, screen);
 
@@ -748,27 +1012,36 @@ void setup() {
 void loop() {
   handleSerial();
 
-  Ev up = pollButton(bUp);
-  Ev ok = pollButton(bOk);
-  Ev dn = pollButton(bDown);
-  bool any = up || ok || dn;
-  uint32_t now = millis();
+  Ev con = pollButton(bCon);
+  Ev psh = pollButton(bPsh);
+  Ev bak = pollButton(bBak);
+  Input in;
+  in.turn     = readEncoder();
+  in.ok       = con == EV_SHORT || psh == EV_SHORT;
+  in.okLong   = con == EV_LONG  || psh == EV_LONG;
+  in.back     = bak == EV_SHORT;
+  in.backLong = bak == EV_LONG;
 
+  uint32_t now = millis();
+  bool any = in.any();
   if (any) lastActivity = now;
 
   if (!displayOn) {
-    if (any) {  // первое нажатие только будит экран
+    if (any) {  // первое действие только будит экран
       displayOn = true;
       u8g2.setPowerSave(0);
       redraw();
     }
-    delay(10);
+    delay(5);
     return;
   }
 
   switch (screen) {
-    case SCR_PIN:  if (any) handlePinScreen(up, ok, dn); break;
-    case SCR_MAIN: if (any) handleMainScreen(up, ok, dn); break;
+    case SCR_PIN:   if (any) handlePinScreen(in); break;
+    case SCR_CODE:  if (any) handleCodeScreen(in); break;
+    case SCR_LIST:  if (any) handleListScreen(in); break;
+    case SCR_MENU:  if (any) handleMenuScreen(in); break;
+    case SCR_ABOUT: if (in.back || in.ok) screen = SCR_MENU; break;
     case SCR_MESSAGE:
       if ((int32_t)(now - messageUntil) >= 0) screen = afterMessage;
       break;
@@ -776,7 +1049,7 @@ void loop() {
 
   if (displayOn && (any || now - lastRedraw > 200)) redraw();
 
-  if (displayOn && now - lastActivity > SLEEP_TIMEOUT_MS) onIdleTimeout();
+  if (displayOn && now - lastActivity > SLEEP_OPTIONS[sleepIdx] * 1000UL) lockAndSleep();
 
-  delay(10);
+  delay(5);
 }
